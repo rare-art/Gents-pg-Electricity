@@ -12,24 +12,37 @@ const JWT_SECRET = process.env.JWT_SECRET || 'gentspg_secret_jwt_key_2026_bhuban
 // @desc    Owner Login
 router.post('/login', async (req, res) => {
   try {
-    const { email, password } = req.body;
-    if (!email || !password) {
+    const rawIdentifier = req.body.email || req.body.username || req.body.identifier;
+    const password = req.body.password;
+
+    console.log(`🔑 [AUTH LOG] Incoming login attempt - Identifier: "${rawIdentifier}"`);
+
+    if (!rawIdentifier || !password) {
+      console.log('⚠️ [AUTH LOG] Login failed: Missing email/username or password in request body.');
       return res.status(400).json({ message: 'Please enter all fields' });
     }
 
+    const cleanIdentifier = String(rawIdentifier).trim().toLowerCase();
+
     const user = await User.findOne({
       $or: [
-        { email: email.toLowerCase() },
-        { username: email.toLowerCase() }
+        { email: cleanIdentifier },
+        { username: cleanIdentifier }
       ]
     });
 
     if (!user) {
+      console.log(`❌ [AUTH LOG] Login failed: No user found with email/username "${cleanIdentifier}".`);
       return res.status(400).json({ message: 'Invalid credentials' });
     }
 
+    console.log(`👤 [AUTH LOG] User retrieved from DB: ${user.email} (Username: ${user.username}, Role: ${user.role})`);
+
     const isMatch = await bcrypt.compare(password, user.password);
+    console.log(`🔐 [AUTH LOG] bcrypt.compare result: ${isMatch}`);
+
     if (!isMatch) {
+      console.log(`❌ [AUTH LOG] Login failed: Password mismatch for user "${cleanIdentifier}".`);
       return res.status(400).json({ message: 'Invalid credentials' });
     }
 
@@ -41,6 +54,7 @@ router.post('/login', async (req, res) => {
     };
 
     const token = jwt.sign(payload, JWT_SECRET, { expiresIn: '7d' });
+    console.log(`✅ [AUTH LOG] Login successful for "${user.email}". JWT issued.`);
 
     res.json({
       token,
@@ -52,7 +66,7 @@ router.post('/login', async (req, res) => {
       }
     });
   } catch (err) {
-    console.error('Login error:', err);
+    console.error('❌ [AUTH LOG] Login error exception:', err);
     res.status(500).json({ message: 'Server error' });
   }
 });
