@@ -1,4 +1,5 @@
-const API_BASE = '/api';
+import { API_URL, API_BASE } from './config';
+
 
 const getHeaders = (includeAuth = true) => {
   const headers = {
