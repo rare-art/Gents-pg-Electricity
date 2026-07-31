@@ -16,14 +16,25 @@ const getHeaders = (includeAuth = true) => {
 
 export const api = {
   // Auth
-  login: async (email, password) => {
-    const res = await fetch(`${API_BASE}/auth/login`, {
+  sendOtp: async (identifier) => {
+    const res = await fetch(`${API_BASE}/auth/send-otp`, {
       method: 'POST',
       headers: getHeaders(false),
-      body: JSON.stringify({ email, password })
+      body: JSON.stringify({ identifier })
     });
     const data = await res.json();
-    if (!res.ok) throw new Error(data.message || 'Login failed');
+    if (!res.ok) throw new Error(data.message || 'Failed to send OTP');
+    return data;
+  },
+
+  verifyOtp: async (identifier, otp) => {
+    const res = await fetch(`${API_BASE}/auth/verify-otp`, {
+      method: 'POST',
+      headers: getHeaders(false),
+      body: JSON.stringify({ identifier, otp })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.message || 'OTP verification failed');
     return data;
   },
   
@@ -33,39 +44,6 @@ export const api = {
     });
     if (!res.ok) return null;
     return await res.json();
-  },
-
-  forgotPassword: async (email) => {
-    const res = await fetch(`${API_BASE}/auth/forgot-password`, {
-      method: 'POST',
-      headers: getHeaders(false),
-      body: JSON.stringify({ email })
-    });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.message || 'Failed to send OTP');
-    return data;
-  },
-
-  verifyOtp: async (email, otp) => {
-    const res = await fetch(`${API_BASE}/auth/verify-otp`, {
-      method: 'POST',
-      headers: getHeaders(false),
-      body: JSON.stringify({ email, otp })
-    });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.message || 'OTP verification failed');
-    return data;
-  },
-
-  resetPassword: async (resetToken, newPassword) => {
-    const res = await fetch(`${API_BASE}/auth/reset-password`, {
-      method: 'POST',
-      headers: getHeaders(false),
-      body: JSON.stringify({ resetToken, newPassword })
-    });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.message || 'Password reset failed');
-    return data;
   },
 
   // Summary Stats

@@ -8,44 +8,187 @@ const authMiddleware = require('../middleware/auth');
 
 const JWT_SECRET = process.env.JWT_SECRET || 'gentspg_secret_jwt_key_2026_bhubaneswar_odisha';
 
-// @route   POST /api/auth/login
-// @desc    Owner Login
-router.post('/login', async (req, res) => {
+// @route   POST /api/auth/send-otp
+// @desc    Send 6-digit OTP to owner email for login (5 min expiry, 60s resend cooldown)
+router.post('/send-otp', async (req, res) => {
   try {
-    const rawIdentifier = req.body.email || req.body.username || req.body.identifier;
-    const password = req.body.password;
-
-    console.log(`🔑 [AUTH LOG] Incoming login attempt - Identifier: "${rawIdentifier}"`);
-
-    if (!rawIdentifier || !password) {
-      console.log('⚠️ [AUTH LOG] Login failed: Missing email/username or password in request body.');
-      return res.status(400).json({ message: 'Please enter all fields' });
+    const rawIdentifier = req.body.identifier || req.body.email || req.body.username;
+    if (!rawIdentifier) {
+      return res.status(400).json({ message: 'Please enter your email address or username.' });
     }
 
     const cleanIdentifier = String(rawIdentifier).trim().toLowerCase();
+    console.log(`🔑 [OTP LOG] Incoming OTP request for identifier: "${cleanIdentifier}"`);
 
     const user = await User.findOne({
       $or: [
         { email: cleanIdentifier },
         { username: cleanIdentifier }
-      ]
+      ],
+      role: 'owner'
     });
 
     if (!user) {
-      console.log(`❌ [AUTH LOG] Login failed: No user found with email/username "${cleanIdentifier}".`);
-      return res.status(400).json({ message: 'Invalid credentials' });
+      console.log(`❌ [OTP LOG] No owner found matching "${cleanIdentifier}"`);
+      return res.status(400).json({ message: 'No owner account found matching that email or username.' });
     }
 
-    console.log(`👤 [AUTH LOG] User retrieved from DB: ${user.email} (Username: ${user.username}, Role: ${user.role})`);
-
-    const isMatch = await bcrypt.compare(password, user.password);
-    console.log(`🔐 [AUTH LOG] bcrypt.compare result: ${isMatch}`);
-
-    if (!isMatch) {
-      console.log(`❌ [AUTH LOG] Login failed: Password mismatch for user "${cleanIdentifier}".`);
-      return res.status(400).json({ message: 'Invalid credentials' });
+    // Check 60-second resend cooldown
+    if (user.lastOtpSentAt) {
+      const msSinceLastSend = Date.now() - new Date(user.lastOtpSentAt).getTime();
+      if (msSinceLastSend < 60000) {
+        const remainingSec = Math.ceil((60000 - msSinceLastSend) / 1000);
+        console.log(`⏱ [OTP LOG] Cooldown active for "${user.email}". ${remainingSec}s remaining.`);
+        return res.status(429).json({
+          message: `Please wait ${remainingSec} seconds before requesting a new OTP.`
+        });
+      }
     }
 
+    // Generate 6-digit OTP (100000 to 999999 inclusive)
+    const otp = crypto.randomInt(100000, 1000000).toString();
+
+    // Hash the OTP before storing in DB
+    const salt = await bcrypt.genSalt(10);
+    const hashedOtp = await bcrypt.hash(otp, salt);
+
+    // Save OTP, expiry (5 mins), and lastOtpSentAt
+    user.loginOtp = hashedOtp;
+    user.loginOtpExpiry = new Date(Date.now() + 5 * 60 * 1000);
+    user.lastOtpSentAt = new Date();
+    await user.save();
+
+    // Send OTP via Resend
+    const resendApiKey = process.env.RESEND_API_KEY;
+    const fromEmail = process.env.FROM_EMAIL || 'no-reply@roamflux.site';
+
+    let resendResult = null;
+    let messageId = null;
+
+    if (!resendApiKey || resendApiKey === 'your_key_here') {
+      console.error('❌ [OTP LOG] RESEND_API_KEY not configured.');
+    } else {
+      const { Resend } = require('resend');
+      const resend = new Resend(resendApiKey);
+
+      resendResult = await resend.emails.send({
+        from: `GentsPG Electricity Manager <${fromEmail}>`,
+        to: [user.email],
+        subject: '🔑 Your Owner Login OTP — GentsPG Electricity Manager',
+        html: `
+          <div style="font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; max-width: 520px; margin: 0 auto; background: #f8fafc; border-radius: 16px; overflow: hidden; border: 1px solid #e2e8f0;">
+            <div style="background: linear-gradient(135deg, #065f46, #4d7c0f); padding: 32px 28px; text-align: center;">
+              <h1 style="color: #ffffff; margin: 0; font-size: 22px; font-weight: 800; letter-spacing: -0.5px;">
+                ⚡ GentsPG Electricity Manager
+              </h1>
+              <p style="color: #d1fae5; margin: 6px 0 0; font-size: 13px;">Owner Portal Secure Login</p>
+            </div>
+            <div style="padding: 32px 28px;">
+              <p style="color: #334155; font-size: 15px; margin: 0 0 12px; line-height: 1.6;">
+                Hello <strong>${user.name || 'Owner'}</strong>,
+              </p>
+              <p style="color: #475569; font-size: 14px; margin: 0 0 24px; line-height: 1.6;">
+                Your 6-digit verification code to log in to the GentsPG Owner Portal is below:
+              </p>
+              <div style="background: #ffffff; border: 2px dashed #10b981; border-radius: 12px; padding: 20px; text-align: center; margin: 0 0 24px;">
+                <p style="color: #64748b; font-size: 11px; text-transform: uppercase; letter-spacing: 2px; margin: 0 0 8px; font-weight: 700;">One-Time Password (OTP)</p>
+                <p style="color: #065f46; font-size: 36px; font-weight: 900; letter-spacing: 8px; margin: 0; font-family: 'Courier New', monospace;">
+                  ${otp}
+                </p>
+              </div>
+              <div style="background: #fef3c7; border-radius: 10px; padding: 14px 16px; margin: 0 0 24px;">
+                <p style="color: #92400e; font-size: 12px; margin: 0; font-weight: 600;">
+                  ⏱ This code expires in <strong>5 minutes</strong>. Do not share this OTP with anyone.
+                </p>
+              </div>
+              <p style="color: #94a3b8; font-size: 12px; margin: 0; line-height: 1.5;">
+                If you did not request this login code, please ignore this email.
+              </p>
+            </div>
+            <div style="background: #f1f5f9; padding: 16px 28px; text-align: center; border-top: 1px solid #e2e8f0;">
+              <p style="color: #94a3b8; font-size: 11px; margin: 0;">
+                © ${new Date().getFullYear()} GentsPG Electricity Manager — Bhubaneswar, Odisha
+              </p>
+            </div>
+          </div>
+        `
+      });
+
+      if (resendResult && resendResult.data) {
+        messageId = resendResult.data.id;
+      }
+      if (resendResult && resendResult.error) {
+        console.error('❌ [RESEND API ERROR]:', resendResult.error);
+      }
+    }
+
+    console.log(`🔑 [OTP LOG] OTP Code: ${otp}`);
+    console.log(`📧 [OTP LOG] Owner Email: ${user.email}`);
+    console.log(`📬 [OTP LOG] Message ID: ${messageId}`);
+
+    res.json({
+      message: `OTP sent to ${user.email}`,
+      email: user.email,
+      username: user.username,
+      _devOtp: (process.env.NODE_ENV === 'development' || !resendResult || resendResult.error) ? otp : undefined
+    });
+  } catch (err) {
+    console.error('❌ [OTP LOG] Error sending OTP:', err);
+    res.status(500).json({ message: 'Failed to send OTP. Please try again.' });
+  }
+});
+
+// @route   POST /api/auth/verify-otp
+// @desc    Verify OTP, invalidate OTP upon success, issue JWT and log Owner in
+router.post('/verify-otp', async (req, res) => {
+  try {
+    const rawIdentifier = req.body.identifier || req.body.email || req.body.username;
+    const { otp } = req.body;
+
+    if (!rawIdentifier || !otp) {
+      return res.status(400).json({ message: 'Email/Username and 6-digit OTP are required.' });
+    }
+
+    const cleanIdentifier = String(rawIdentifier).trim().toLowerCase();
+    const cleanOtp = String(otp).trim();
+
+    console.log(`🔍 [AUTH LOG] Verifying OTP for identifier: "${cleanIdentifier}"`);
+
+    const user = await User.findOne({
+      $or: [
+        { email: cleanIdentifier },
+        { username: cleanIdentifier }
+      ],
+      role: 'owner'
+    });
+
+    if (!user || !user.loginOtp || !user.loginOtpExpiry) {
+      return res.status(400).json({ message: 'Invalid or expired OTP. Please request a new one.' });
+    }
+
+    // Enforce 5-minute expiry
+    if (new Date() > new Date(user.loginOtpExpiry)) {
+      console.log(`⏰ [AUTH LOG] OTP expired for user "${user.email}"`);
+      user.loginOtp = null;
+      user.loginOtpExpiry = null;
+      await user.save();
+      return res.status(400).json({ message: 'OTP has expired. Please request a new one.' });
+    }
+
+    // Compare bcrypt hash
+    const isValid = await bcrypt.compare(cleanOtp, user.loginOtp);
+    if (!isValid) {
+      console.log(`❌ [AUTH LOG] Invalid OTP provided for user "${user.email}"`);
+      return res.status(400).json({ message: 'Invalid OTP code. Please check and try again.' });
+    }
+
+    // Invalidate OTP after successful login
+    user.loginOtp = null;
+    user.loginOtpExpiry = null;
+    await user.save();
+    console.log(`✅ [AUTH LOG] OTP successfully verified and invalidated for "${user.email}".`);
+
+    // Generate JWT
     const payload = {
       id: user._id,
       email: user.email,
@@ -54,7 +197,6 @@ router.post('/login', async (req, res) => {
     };
 
     const token = jwt.sign(payload, JWT_SECRET, { expiresIn: '7d' });
-    console.log(`✅ [AUTH LOG] Login successful for "${user.email}". JWT issued.`);
 
     res.json({
       token,
@@ -63,11 +205,12 @@ router.post('/login', async (req, res) => {
         email: user.email,
         name: user.name,
         role: user.role
-      }
+      },
+      message: 'Login successful'
     });
   } catch (err) {
-    console.error('❌ [AUTH LOG] Login error exception:', err);
-    res.status(500).json({ message: 'Server error' });
+    console.error('❌ [AUTH LOG] Verify OTP error:', err);
+    res.status(500).json({ message: 'Server error. Please try again.' });
   }
 });
 
@@ -75,201 +218,10 @@ router.post('/login', async (req, res) => {
 // @desc    Get current user details
 router.get('/me', authMiddleware, async (req, res) => {
   try {
-    const user = await User.findById(req.user.id).select('-password -resetOtp -resetOtpExpiry');
+    const user = await User.findById(req.user.id).select('-password -loginOtp -loginOtpExpiry -resetOtp -resetOtpExpiry');
     res.json(user);
   } catch (err) {
     res.status(500).json({ message: 'Server error' });
-  }
-});
-
-// @route   POST /api/auth/forgot-password
-// @desc    Send 6-digit OTP to owner email for password reset
-router.post('/forgot-password', async (req, res) => {
-  try {
-    const { email } = req.body;
-    if (!email) {
-      return res.status(400).json({ message: 'Please enter your email address' });
-    }
-
-    const user = await User.findOne({ email: email.toLowerCase(), role: 'owner' });
-
-    // Always return success to avoid revealing whether the email exists
-    if (!user) {
-      return res.json({ message: 'If an account with that email exists, an OTP has been sent.' });
-    }
-
-    // Generate 6-digit OTP
-    const otp = crypto.randomInt(100000, 999999).toString();
-
-    // Hash the OTP before storing
-    const salt = await bcrypt.genSalt(10);
-    const hashedOtp = await bcrypt.hash(otp, salt);
-
-    // Store hashed OTP and set expiry to 15 minutes from now
-    user.resetOtp = hashedOtp;
-    user.resetOtpExpiry = new Date(Date.now() + 15 * 60 * 1000);
-    await user.save();
-
-    // Send OTP via Resend
-    const resendApiKey = process.env.RESEND_API_KEY;
-    const fromEmail = process.env.FROM_EMAIL || 'onboarding@resend.dev';
-
-    if (!resendApiKey || resendApiKey === 'your_key_here') {
-      console.error('❌ RESEND_API_KEY not configured. OTP generated:', otp);
-      return res.json({
-        message: 'If an account with that email exists, an OTP has been sent.',
-        _devOtp: process.env.NODE_ENV === 'development' ? otp : undefined
-      });
-    }
-
-    const { Resend } = require('resend');
-    const resend = new Resend(resendApiKey);
-
-    await resend.emails.send({
-      from: `GentsPG Electricity <${fromEmail}>`,
-      to: [user.email],
-      subject: '🔐 Password Reset OTP — GentsPG Electricity Manager',
-      html: `
-        <div style="font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; max-width: 520px; margin: 0 auto; background: #f8fafc; border-radius: 16px; overflow: hidden; border: 1px solid #e2e8f0;">
-          <div style="background: linear-gradient(135deg, #065f46, #4d7c0f); padding: 32px 28px; text-align: center;">
-            <h1 style="color: #ffffff; margin: 0; font-size: 22px; font-weight: 800; letter-spacing: -0.5px;">
-              ⚡ GentsPG Electricity Manager
-            </h1>
-            <p style="color: #d1fae5; margin: 6px 0 0; font-size: 13px;">Password Reset Request</p>
-          </div>
-          <div style="padding: 32px 28px;">
-            <p style="color: #334155; font-size: 15px; margin: 0 0 12px; line-height: 1.6;">
-              Hello <strong>${user.name || 'Owner'}</strong>,
-            </p>
-            <p style="color: #475569; font-size: 14px; margin: 0 0 24px; line-height: 1.6;">
-              We received a request to reset your password. Use the OTP below to verify your identity:
-            </p>
-            <div style="background: #ffffff; border: 2px dashed #10b981; border-radius: 12px; padding: 20px; text-align: center; margin: 0 0 24px;">
-              <p style="color: #64748b; font-size: 11px; text-transform: uppercase; letter-spacing: 2px; margin: 0 0 8px; font-weight: 700;">Your OTP Code</p>
-              <p style="color: #065f46; font-size: 36px; font-weight: 900; letter-spacing: 8px; margin: 0; font-family: 'Courier New', monospace;">
-                ${otp}
-              </p>
-            </div>
-            <div style="background: #fef3c7; border-radius: 10px; padding: 14px 16px; margin: 0 0 24px;">
-              <p style="color: #92400e; font-size: 12px; margin: 0; font-weight: 600;">
-                ⏱ This OTP expires in <strong>15 minutes</strong>. Do not share this code with anyone.
-              </p>
-            </div>
-            <p style="color: #94a3b8; font-size: 12px; margin: 0; line-height: 1.5;">
-              If you didn't request this, you can safely ignore this email. Your password will remain unchanged.
-            </p>
-          </div>
-          <div style="background: #f1f5f9; padding: 16px 28px; text-align: center; border-top: 1px solid #e2e8f0;">
-            <p style="color: #94a3b8; font-size: 11px; margin: 0;">
-              © ${new Date().getFullYear()} GentsPG Electricity Manager — Bhubaneswar, Odisha
-            </p>
-          </div>
-        </div>
-      `
-    });
-
-    console.log(`📧 Password reset OTP sent to ${user.email}`);
-    res.json({ message: 'If an account with that email exists, an OTP has been sent.' });
-
-  } catch (err) {
-    console.error('Forgot password error:', err);
-    res.status(500).json({ message: 'Failed to process request. Please try again.' });
-  }
-});
-
-// @route   POST /api/auth/verify-otp
-// @desc    Verify OTP and return a short-lived reset token
-router.post('/verify-otp', async (req, res) => {
-  try {
-    const { email, otp } = req.body;
-    if (!email || !otp) {
-      return res.status(400).json({ message: 'Email and OTP are required' });
-    }
-
-    const user = await User.findOne({ email: email.toLowerCase(), role: 'owner' });
-
-    if (!user || !user.resetOtp || !user.resetOtpExpiry) {
-      return res.status(400).json({ message: 'Invalid or expired OTP. Please request a new one.' });
-    }
-
-    // Check expiry
-    if (new Date() > user.resetOtpExpiry) {
-      // Clear expired OTP
-      user.resetOtp = null;
-      user.resetOtpExpiry = null;
-      await user.save();
-      return res.status(400).json({ message: 'OTP has expired. Please request a new one.' });
-    }
-
-    // Verify OTP
-    const isValid = await bcrypt.compare(otp, user.resetOtp);
-    if (!isValid) {
-      return res.status(400).json({ message: 'Invalid OTP. Please check and try again.' });
-    }
-
-    // Generate a short-lived reset token (10 minutes)
-    const resetToken = jwt.sign(
-      { id: user._id, email: user.email, purpose: 'password-reset' },
-      JWT_SECRET,
-      { expiresIn: '10m' }
-    );
-
-    // Clear the OTP after successful verification
-    user.resetOtp = null;
-    user.resetOtpExpiry = null;
-    await user.save();
-
-    res.json({ resetToken, message: 'OTP verified successfully.' });
-
-  } catch (err) {
-    console.error('Verify OTP error:', err);
-    res.status(500).json({ message: 'Server error. Please try again.' });
-  }
-});
-
-// @route   POST /api/auth/reset-password
-// @desc    Reset password using verified reset token
-router.post('/reset-password', async (req, res) => {
-  try {
-    const { resetToken, newPassword } = req.body;
-    if (!resetToken || !newPassword) {
-      return res.status(400).json({ message: 'Reset token and new password are required' });
-    }
-
-    if (newPassword.length < 6) {
-      return res.status(400).json({ message: 'Password must be at least 6 characters long' });
-    }
-
-    // Verify reset token
-    let decoded;
-    try {
-      decoded = jwt.verify(resetToken, JWT_SECRET);
-    } catch (tokenErr) {
-      return res.status(400).json({ message: 'Reset session has expired. Please start over.' });
-    }
-
-    if (decoded.purpose !== 'password-reset') {
-      return res.status(400).json({ message: 'Invalid reset token.' });
-    }
-
-    const user = await User.findById(decoded.id);
-    if (!user) {
-      return res.status(400).json({ message: 'User not found.' });
-    }
-
-    // Hash and update password
-    const salt = await bcrypt.genSalt(10);
-    user.password = await bcrypt.hash(newPassword, salt);
-    user.resetOtp = null;
-    user.resetOtpExpiry = null;
-    await user.save();
-
-    console.log(`🔑 Password reset successful for ${user.email}`);
-    res.json({ message: 'Password has been reset successfully. You can now log in.' });
-
-  } catch (err) {
-    console.error('Reset password error:', err);
-    res.status(500).json({ message: 'Server error. Please try again.' });
   }
 });
 

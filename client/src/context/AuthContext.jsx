@@ -29,8 +29,12 @@ export const AuthProvider = ({ children }) => {
     initAuth();
   }, [token]);
 
-  const login = async (email, password) => {
-    const data = await api.login(email, password);
+  const sendOtp = async (identifier) => {
+    return await api.sendOtp(identifier);
+  };
+
+  const verifyOtpAndLogin = async (identifier, otp) => {
+    const data = await api.verifyOtp(identifier, otp);
     localStorage.setItem('gentspg_token', data.token);
     setToken(data.token);
     setUser(data.user);
@@ -53,7 +57,9 @@ export const AuthProvider = ({ children }) => {
         token,
         isOwner,
         loading,
-        login,
+        sendOtp,
+        verifyOtpAndLogin,
+        login: verifyOtpAndLogin,
         logout,
         showLoginModal,
         setShowLoginModal,
